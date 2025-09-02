@@ -2,6 +2,7 @@ import logging
 import os
 import glob
 from pathlib import Path
+import csv
 
 import SimpleITK as sitk
 import numpy as np
@@ -43,7 +44,7 @@ def _validate_inputs(nifti_path: str, dicom_path: str, output_path: str) -> None
     """Validates the input paths."""
     nifti_dir = Path(nifti_path)
     if not nifti_dir.is_dir():
-        raise ValueError(f"Invalid NIfTI directory: {nifti_path}")
+        raise ValueError(f"Invalid Nifti directory: {nifti_path}")
 
     dicom_dir = Path(dicom_path)
     if not dicom_dir.is_dir():
@@ -53,13 +54,70 @@ def _validate_inputs(nifti_path: str, dicom_path: str, output_path: str) -> None
     if not output_file.parent.is_dir():
         raise ValueError(f"Invalid output directory: {output_file.parent}")
 
+def load_segment_name_mapping(csv_path: str) -> dict[str, str]:
+    """
+    Load a mapping from Nifti filenames to ROI names
+    for auto segmentations.
+
+    :param csv_path: Path to the CSV file.
+    :return: dict where key=filename, value=ROI name
+    """
+    mapping = {}
+    with open(csv_path, newline="") as csvfile:
+        reader = csv.reader(csvfile)
+        next(reader)  # skip header if present
+        for row in reader:
+            if len(row) >= 4:
+                roi_name = row[0].strip()
+                filename = row[2].strip()
+                mapping[filename] = roi_name
+    return mapping
+
+def same_geometry(img1: sitk.Image, img2: sitk.Image) -> bool:
+    """Checks if two SimpleITK images have the same geometry.
+
+    Compares size, spacing, origin, and direction of two images.
+
+    Args:
+        img1: The first SimpleITK image.
+        img2: The second SimpleITK image.
+
+    Returns:
+        True if the images have the same geometry, False otherwise.
+    """
+    return (
+        img1.GetSize() == img2.GetSize() and
+        np.allclose(img1.GetSpacing(), img2.GetSpacing()) and
+        np.allclose(img1.GetOrigin(), img2.GetOrigin()) and
+        np.allclose(img1.GetDirection(), img2.GetDirection())
+    )
+
+def ensure_lps_orientation(img: sitk.Image, name: str = "image") -> sitk.Image:
+    """Ensures the image is in LPS orientation.
+
+    Checks the orientation of the input SimpleITK image and converts it to LPS
+    (Left, Posterior, Superior) if necessary.
+
+    Args:
+        img: The SimpleITK image.
+        name: The name of the image (for logging).
+
+    Returns:
+        The image in LPS orientation.
+    """
+    orient = sitk.DICOMOrientImageFilter_GetOrientationFromDirectionCosines(img.GetDirection())
+    if orient != "LPS":
+        logging.info(f"{name} orientation is {orient}, converting to LPS")
+        return sitk.DICOMOrient(img, "LPS")
+    return img
+
 def nifti_to_rtstruct_conversion(nifti_path: str, dicom_path: str, output_path: str) -> bool:
 
-    """Converts NIfTI image files to an RT Struct file based on the corresponding
+    """Converts Nifti image files to an RT Struct file based on the corresponding
     DICOM series.
 
     Args:
-        nifti_path: Path to the directory containing NIfTI files.
+        nifti_path: Path to the directory containing Nifti files.
         dicom_path: Path to the directory containing the DICOM series.
         output_path: Path to save the generated RTStruct file.
 
@@ -68,13 +126,12 @@ def nifti_to_rtstruct_conversion(nifti_path: str, dicom_path: str, output_path: 
 
     Raises:
         FileNotFoundError: If the DICOM series is not found.
-        ValueError: If input paths are invalid or no NIfTI files are found.
-        RuntimeError: If a NIfTI file cannot be read or processed, or if the
+        ValueError: If input paths are invalid or no Nifti files are found.
+        RuntimeError: If a Nifti file cannot be read or processed, or if the
         RTStruct cannot be saved.
     """
 
-    logging.info("Converting NIfTI to RTStruct...")
-    print("Converting NIfTI to RTStruct...")
+    logging.info("Converting Nifti to RTStruct...")
 
     try:
         # Validate inputs
@@ -102,45 +159,49 @@ def nifti_to_rtstruct_conversion(nifti_path: str, dicom_path: str, output_path: 
 
         # Raise error if no Nifti files found
         if not nifti_files_list:
-            logging.error(f"No NIfTI files found at: {nifti_path}")
-            raise ValueError(f"No NIfTI files found at: {nifti_path}")
+            logging.error(f"No Nifti files found at: {nifti_path}")
+            raise ValueError(f"No Nifti files found at: {nifti_path}")
+
+        # Load CSV name mapping
+        segment_name_map = load_segment_name_mapping("data/csv/totalSegmentOrganNames.csv")
 
         for img in nifti_files_list:
             try:
-                # Get the file name from path (img)
-                nifti_file_name = os.path.basename(img)
-
-                # Get structure name
-                structure_name = os.path.splitext(os.path.splitext(nifti_file_name)[0])[0]
-
-                # Log progress
-                logging.info(f"Converting {os.path.basename(img)} to DICOM RTStruct")
-
-                # Load segmentation nifti image
                 nifti_img = sitk.ReadImage(img)
+                nifti_file_name = os.path.basename(img).split(".")[0]
 
-                # Orientate nifti image to the dicom standard
-                nifti_img = sitk.DICOMOrient(nifti_img, 'LPS')
+                # Skip empty masks
+                if not np.any(sitk.GetArrayFromImage(nifti_img)):
+                    logging.info(f"Skipping empty mask: {nifti_file_name}")
+                    continue
 
-                # Ensure orientations match
-                nifti_img.CopyInformation(dicom_img)
+                # Skip images that are not 3D
+                if nifti_img.GetDimension() != 3:
+                    logging.warning(f"Skipping {nifti_file_name}: not 3D")
+                    continue
 
-                # Resample segmentation to match CT
-                aligned_seg_image = _resample_seg_to_ct(dicom_img, nifti_img)
+                # Look up ROI name from CSV mapping
+                structure_name = segment_name_map.get(nifti_file_name, nifti_file_name)
 
-                # Access image data as array and convert to bool type for mask rt_util input
-                nifti_array = sitk.GetArrayFromImage(aligned_seg_image).astype(bool)
+                # If name not in csv append '_TS' to nifti file name
+                if structure_name == nifti_file_name:
+                    structure_name = structure_name + "_TS"
 
-                # Transpose the array before passing to rt_util as expects (y, x, z) configuration
+                logging.info(f"Converting {nifti_file_name}.nii.gz → ROI: {structure_name}")
+
+                nifti_img = ensure_lps_orientation(nifti_img, nifti_file_name)
+
+                if not same_geometry(dicom_img, nifti_img):
+                    nifti_img = _resample_seg_to_ct(dicom_img, nifti_img)
+
+                nifti_array = sitk.GetArrayFromImage(nifti_img).astype(bool)
                 nifti_array = np.transpose(nifti_array, (1, 2, 0))
 
                 rtstruct.add_roi(mask=nifti_array, name=structure_name)
-            except RuntimeError as e:
-                logging.error(f"Error reading or processing NIfTI file: {img}: {e}")
-                raise # Re-raise the exception after logging
+
             except Exception as e:
-                logging.error(f"An unexpected error occurred while processing NIfTI file {img}: {e}")
-                raise
+                logging.error(f"Error processing {img}: {e}")
+                continue
 
         rtstruct.save(output_path)
         return True
