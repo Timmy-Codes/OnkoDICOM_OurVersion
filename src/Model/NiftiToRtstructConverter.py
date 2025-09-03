@@ -185,7 +185,7 @@ def nifti_to_rtstruct_conversion(nifti_path: str, dicom_path: str, output_path: 
 
                 # If name not in csv append '_TS' to nifti file name
                 if structure_name == nifti_file_name:
-                    structure_name = structure_name + "_TS"
+                    structure_name = f"{structure_name}_TS"
 
                 logging.info(f"Converting {nifti_file_name}.nii.gz → ROI: {structure_name}")
 
