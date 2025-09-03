@@ -194,7 +194,10 @@ def nifti_to_rtstruct_conversion(nifti_path: str, dicom_path: str, output_path: 
                 if not same_geometry(dicom_img, nifti_img):
                     nifti_img = _resample_seg_to_ct(dicom_img, nifti_img)
 
+                # Access image data as array and convert to bool type for mask rt_util input
                 nifti_array = sitk.GetArrayFromImage(nifti_img).astype(bool)
+
+                # Transpose the array before passing to rt_util as expects (y, x, z) configuration
                 nifti_array = np.transpose(nifti_array, (1, 2, 0))
 
                 rtstruct.add_roi(mask=nifti_array, name=structure_name)
