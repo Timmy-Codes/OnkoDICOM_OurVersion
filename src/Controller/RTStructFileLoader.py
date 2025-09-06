@@ -63,6 +63,7 @@ def _parse_rtss_and_images(rtss_path: str, directory: str) -> dict:
     }
 
 def load_rtss_file_to_patient_dict(patient_dict_container: PatientDictContainer) -> None:
+    
     """Loads RTSTRUCT data into the patient dictionary.
 
     This function reads the RTSTRUCT file specified in the
@@ -71,13 +72,15 @@ def load_rtss_file_to_patient_dict(patient_dict_container: PatientDictContainer)
     the extracted information.  It also initializes the 'selected_rois'
     list in the container.
     """
+
     rtss_path = patient_dict_container.filepaths["rtss"]
     if not rtss_path:
         logger.error("No rtss file found")
         return
 
     data = _parse_rtss_and_images(rtss_path, patient_dict_container.path)
-    # Add parsed data to the patient dict
+    
+    # load parsed data into patient_dict_container
     for key, val in data.items():
         patient_dict_container.set(key, val)
     patient_dict_container.set("selected_rois", [])
